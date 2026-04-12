@@ -1,7 +1,7 @@
 # NeuroGRIP: Retrieval-Augmented Graph Refinement for Knowledge-Grounded EEG Seizure Diagnosis
 
-The official implementation of **NeuroGRIP**.
----
+> The official implementation of **NeuroGRIP**
+
 
 ## Overview
 
