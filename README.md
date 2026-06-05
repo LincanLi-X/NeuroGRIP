@@ -21,7 +21,7 @@ This repository has been updated to better align with the paper workflow:
 - `SemAlignQuery` now uses **k-hop subgraph aggregation** (not only per-node MLP projection).
 - RAG input uses **STGNN node embeddings** (not raw `x` directly).
 - Added BioBERT + FAISS index build script:  
-  `model/eeg_ragnet/build_biobert_faiss.py`
+  `model/neurogrip/build_biobert_faiss.py`
 - KG schema handling improved:
   - supports page-level `KG_triplets.json`,
   - generates/uses flat triplets (`KG_triplets_flat.json`) for index alignment.
@@ -29,8 +29,11 @@ This repository has been updated to better align with the paper workflow:
   - `sim * reliability * match`,
   - top-M aggregation,
   - **raw-edge pruning semantics** (no post-fusion edge creation).
+- Retrieval now supports `--rag_backend auto`:
+  - production uses BioBERT + FAISS when `faiss.index` is available,
+  - lightweight NumPy fallback keeps debugging/tests executable before index generation.
 - Batch handling for retrieval/refinement fixed.
-- Evaluation (`evaluate`) now also runs RAG refinement for unified train/inference behavior.
+- Training and evaluation now both re-run graph backbones with refined graphs, including DCRNN support conversion.
 
 ---
 
@@ -48,9 +51,9 @@ NeuroGRIP/
 │   ├── BIOT.py
 │   ├── lstm.py
 │   ├── cnnlstm.py
-│   └── eeg_ragnet/
+│   └── neurogrip/
 │       ├── __init__.py
-│       ├── eeg_ragnet.py
+│       ├── neurogrip.py
 │       ├── semantic_query.py
 │       ├── faiss_retriever.py
 │       ├── graph_refiner.py
@@ -80,8 +83,8 @@ cd NeuroGRIP
 ### 2) Environment
 
 ```bash
-conda create -n eeg_ragnet python=3.9 -y
-conda activate eeg_ragnet
+conda create -n neurogrip python=3.9 -y
+conda activate neurogrip
 pip install -r requirements.txt
 ```
 
@@ -114,24 +117,40 @@ data/file_markers_detection/
 
 ## Knowledge Pipeline
 
-### Step 1) Build page-level knowledge + triplets
+### Step 1) Build or flatten the knowledge graph
+
+If you already have `KG_triplets.json`, generate the flat retrieval file:
 
 ```bash
-python model/eeg_ragnet/knowledge_base.py
+python model/neurogrip/knowledge_base.py \
+  --flatten_only \
+  --kg_out model/neurogrip/KG_triplets.json \
+  --flat_out model/neurogrip/KG_triplets_flat.json
+```
+
+To rebuild from guideline PDFs, set `OPENAI_API_KEY` and provide PDFs:
+
+```bash
+python model/neurogrip/knowledge_base.py \
+  --input_pdfs path/to/ILAE.pdf path/to/NICE.pdf \
+  --knowledge_out model/neurogrip/knowledge.json \
+  --kg_out model/neurogrip/KG_triplets.json \
+  --flat_out model/neurogrip/KG_triplets_flat.json \
+  --model gpt-5.1
 ```
 
 Outputs:
-- `model/eeg_ragnet/knowledge.json`
-- `model/eeg_ragnet/KG_triplets.json`
-- `model/eeg_ragnet/KG_triplets_flat.json` (flat triplets for retrieval alignment)
+- `model/neurogrip/knowledge.json`
+- `model/neurogrip/KG_triplets.json`
+- `model/neurogrip/KG_triplets_flat.json` (flat triplets for retrieval alignment)
 
 ### Step 2) Build BioBERT embeddings + FAISS index
 
 ```bash
-python model/eeg_ragnet/build_biobert_faiss.py \
-  --kg_json_path model/eeg_ragnet/KG_triplets.json \
-  --out_triplets_path model/eeg_ragnet/KG_triplets_flat.json \
-  --out_index_path model/eeg_ragnet/faiss.index \
+python model/neurogrip/build_biobert_faiss.py \
+  --kg_json_path model/neurogrip/KG_triplets.json \
+  --out_triplets_path model/neurogrip/KG_triplets_flat.json \
+  --out_index_path model/neurogrip/faiss.index \
   --biobert_model_name dmis-lab/biobert-base-cased-v1.1
 ```
 
@@ -144,7 +163,8 @@ python model/eeg_ragnet/build_biobert_faiss.py \
    - k-hop neighborhood aggregation builds subgraph query vectors.
 
 2. **Knowledge Retrieval (`faiss_retriever.py`)**
-   - query vectors retrieve top-K medical triplets via FAISS.
+   - query vectors retrieve top-K medical triplets via BioBERT+FAISS in production.
+   - `--rag_backend auto` falls back to deterministic NumPy retrieval when no FAISS index is present.
 
 3. **Graph Refinement (`graph_refiner.py`)**
    - edge confidence uses:
@@ -165,14 +185,14 @@ Example (EvolveGCN + NeuroGRIP):
 python main.py \
   --model_name evolvegcn \
   --task detection \
-  --use_ragnet \
+  --use_neurogrip \
   --input_dir processed_data2 \
-  --kg_triplets_path model/eeg_ragnet/KG_triplets_flat.json \
-  --faiss_index_path model/eeg_ragnet/faiss.index
+  --kg_triplets_path model/neurogrip/KG_triplets_flat.json \
+  --faiss_index_path model/neurogrip/faiss.index
 ```
 
-> `model_name='eeg_ragnet'` is not a standalone classifier.  
-> Use a backbone model (`evobrain`, `evolvegcn`, `dcrnn`, etc.) with `--use_ragnet`.
+> `model_name='neurogrip'` is not a standalone classifier.  
+> Use a backbone model (`evobrain`, `evolvegcn`, `dcrnn`, etc.) with `--use_neurogrip`.
 
 ---
 
@@ -180,12 +200,15 @@ python main.py \
 
 | Argument | Description | Default |
 |---|---|---|
-| `--use_ragnet` | Enable RAG refinement | `False` |
-| `--kg_triplets_path` | Flat triplets aligned with FAISS ids | `model/eeg_ragnet/KG_triplets_flat.json` |
-| `--faiss_index_path` | FAISS index path | `model/eeg_ragnet/faiss.index` |
+| `--use_neurogrip` | Enable NeuroGRIP graph refinement | `False` |
+| `--kg_triplets_path` | Flat triplets aligned with FAISS ids | `model/neurogrip/KG_triplets_flat.json` |
+| `--faiss_index_path` | FAISS index path | `model/neurogrip/faiss.index` |
+| `--rag_backend` | `auto`, `faiss`, or `numpy` retrieval backend | `auto` |
 | `--topk_retrieval` | Top-K triplets per node query | `5` |
+| `--semantic_proj_dim` | Query dimension; BioBERT `[head||tail]` index uses 1536 | `1536` |
 | `--semantic_k_hop` | k-hop neighborhood size for SemAlignQuery | `2` |
 | `--refine_threshold` | Edge pruning threshold | `0.6` |
+| `--match_mode` | Edge-triplet match policy: `evidence`, `soft`, or `strict` | `evidence` |
 | `--refine_interval` | Apply refinement every N steps | `1` |
 | `--num_epochs` | Training epochs | `100` |
 
@@ -199,6 +222,18 @@ See full options in `args.py`.
 - RAG support logs: `results/graph_refinement/triplet_supports.json`
 - Dev/test prediction artifacts (`*.npz`, ROC data, hidden features)
 
+---
+
+## Lightweight Validation
+
+The core RAG modules can be tested without TUSZ/CHB-MIT, FAISS, BioBERT, or h5py:
+
+```bash
+python tests/test_neurogrip_core.py
+```
+
+This verifies SemAlignQuery shape, NumPy fallback retrieval, pruning semantics, and an end-to-end synthetic `NeuroGRIP.refine_graph` call.
+
 
 ---
 
@@ -207,7 +242,7 @@ See full options in `args.py`.
 If you find this project useful, please considering cite our work:
 
 ```
-@article{EEGRAGNet2026,
+@article{NeuroGRIP2026,
   title={NeuroGRIP: Retrieval-Augmented Graph Refinement for Knowledge-Grounded EEG Seizure Diagnosis},
   author={First Author, Second Author, Third Author, et al.},
   journal={Under Review},
